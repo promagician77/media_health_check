@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Media Data Health Check</title>
+<meta name="description" content="Eleven SQL checks run against a synthetic four-client media warehouse with eleven hidden faults.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <p class="eyebrow">Prepared for Part and Sum · Business Analyst, Media Data and MarTech</p>
+    <h1>Media Data Health Check</h1>
+    <p class="lede">A synthetic four-client media warehouse (Meta, Google Ads, DV360, GA4) with eleven faults hidden in it. Eleven SQL checks, run for real. Nothing here is a client's data.</p>
+    <dl class="stats" id="stats"></dl>
+  </div>
+</header>
+
+<nav class="tabs" aria-label="Sections">
+  <div class="wrap">
+    <div role="tablist" id="tablist"></div>
+  </div>
+</nav>
+
+<main class="wrap" id="panels"></main>
+
+<footer class="foot wrap">
+  <p id="footline"></p>
+</footer>
+
+<div id="tip" role="tooltip" hidden></div>
+<script src="data/results.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

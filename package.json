@@ -1,0 +1,10 @@
+{
+  "name": "media-data-health-check",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Eleven SQL checks run against a synthetic four-client media warehouse with eleven hidden faults.",
+  "scripts": {
+    "dev": "npx serve site",
+    "build": "echo 'static site, nothing to build'"
+  }
+}

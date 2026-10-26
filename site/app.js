@@ -1,0 +1,523 @@
+(() => {
+  'use strict';
+  const R = window.RESULTS;
+  const NS = 'http://www.w3.org/2000/svg';
+  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const SRC = { meta: 'Meta Ads', gads: 'Google Ads', dv360: 'DV360', ga4: 'GA4' };
+  const C = Object.fromEntries(R.clients.map(c => [c.id, c]));
+  const V = R.validation;
+
+  const $ = (s, root = document) => root.querySelector(s);
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const fmt = n => Math.round(n).toLocaleString('en-US');
+  const pc = (x, p = 1) => (x * 100).toFixed(p) + '%';
+  const dl = iso => { const d = new Date(iso + 'T00:00:00Z'); return d.getUTCDate() + ' ' + MONTHS[d.getUTCMonth()]; };
+
+  function el(tag, attrs = {}, ...kids) {
+    const n = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs)) {
+      if (v === false || v == null) continue;
+      if (k === 'class') n.className = v;
+      else if (k === 'html') n.innerHTML = v;
+      else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
+      else n.setAttribute(k, v === true ? '' : v);
+    }
+    for (const kid of kids.flat()) if (kid != null && kid !== false) n.append(kid.nodeType ? kid : document.createTextNode(kid));
+    return n;
+  }
+  function sv(tag, attrs = {}, ...kids) {
+    const n = document.createElementNS(NS, tag);
+    for (const [k, v] of Object.entries(attrs)) if (v != null && v !== false) n.setAttribute(k, v);
+    for (const kid of kids.flat()) if (kid != null) n.append(kid.nodeType ? kid : document.createTextNode(kid));
+    return n;
+  }
+
+  /* ---------- tooltip ---------- */
+  const tip = $('#tip');
+  function place(e) {
+    const pad = 14; let x = e.clientX + pad, y = e.clientY + pad;
+    const r = tip.getBoundingClientRect();
+    if (x + r.width > innerWidth - 8) x = e.clientX - r.width - pad;
+    if (y + r.height > innerHeight - 8) y = e.clientY - r.height - pad;
+    tip.style.left = Math.max(8, x) + 'px'; tip.style.top = Math.max(8, y) + 'px';
+  }
+  function hover(node, html) {
+    node.addEventListener('mouseenter', e => { tip.innerHTML = html(); tip.hidden = false; place(e); });
+    node.addEventListener('mousemove', place);
+    node.addEventListener('mouseleave', () => { tip.hidden = true; });
+  }
+
+  /* ---------- chart helpers ---------- */
+  const lin = (d0, d1, r0, r1) => v => r0 + (v - d0) * (r1 - r0) / (d1 - d0 || 1);
+  function frame(W, H, label) {
+    return sv('svg', { class: 'chart', viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': label });
+  }
+  function yAxis(g, y, ticks, x0, x1, f = fmt) {
+    const grid = sv('g', { class: 'grid' }), ax = sv('g', { class: 'axis' });
+    for (const t of ticks) {
+      grid.append(sv('line', { x1: x0, x2: x1, y1: y(t), y2: y(t) }));
+      ax.append(sv('text', { x: x0 - 8, y: y(t) + 4, 'text-anchor': 'end' }, f(t)));
+    }
+    g.append(grid, ax);
+  }
+  function xLabels(g, xs, labels, y, every) {
+    const ax = sv('g', { class: 'axis' });
+    xs.forEach((x, i) => { if (i % every === 0) ax.append(sv('text', { x, y, 'text-anchor': 'middle' }, labels[i])); });
+    g.append(ax);
+  }
+  function legend(items) {
+    return el('div', { class: 'legend-row' }, items.map(([cls, style, text]) =>
+      el('span', {}, el('i', { class: 'sw ' + cls, style }), text)));
+  }
+  function tableView(headers, rows) {
+    const t = el('table', { class: 'data' },
+      el('thead', {}, el('tr', {}, headers.map(h => el('th', {}, h)))),
+      el('tbody', {}, rows.map(r => el('tr', {}, r.map(c => el('td', {}, c))))));
+    return el('details', { class: 'table' }, el('summary', {}, 'Show as a table'), el('div', { class: 'scroll' }, t));
+  }
+  const hatch = () => sv('defs', {},
+    sv('pattern', { id: 'hatch', width: 6, height: 6, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' },
+      sv('rect', { width: 6, height: 6, style: 'fill:var(--crit-bg)' }),
+      sv('line', { x1: 0, y1: 0, x2: 0, y2: 6, style: 'stroke:var(--crit);stroke-width:2' })));
+
+  /* ---------- header ---------- */
+  const m = R.meta;
+  const headroom = R.alerts.find(a => a.check === 'ga4_headroom');
+  const lead = headroom && headroom.evidence.lead_days;
+  const stat = (v, label, small) => el('div', { class: 'stat' }, el('dt', {}, label), el('dd', {}, v), el('small', {}, small));
+  $('#stats').append(
+    stat(`${m.caught} / ${m.faults}`, 'hidden faults found', `${m.cells} checks per run, seed ${m.seed}`),
+    stat(String(V.clean.alerts), 'false alarms on clean data', `${V.clean.runs} clean seeds × ${m.cells} checks = ${fmt(V.clean.cells)} checks`),
+    stat(`${V.faulted.caught} / ${V.faulted.faults}`, 'found on 20 other seeds', `Same faults, different noise. ${V.faulted.unexplained} unexplained alerts`),
+    stat(`${lead} days`, 'of warning before the GA4 gap', 'Export limit watch on Cobalt Mobile')
+  );
+  $('#footline').textContent = `All data is synthetic, generated by gen_data.py. Window ${dl(m.first_day)} to ${dl(m.last_day)} 2026, as of ${dl(m.as_of)}. Rendered from results.js produced by run_checks.py.`;
+
+  /* ---------- tabs ---------- */
+  const TABS = [
+    ['board', 'Board', String(m.caught)], ['ga4', 'GA4 export gap'], ['shift', 'Day shift'], ['channels', 'Channels'],
+    ['conversions', 'Conversions'], ['queue', 'Request queue'], ['sql', 'SQL and scope']
+  ];
+  const tablist = $('#tablist'), panels = $('#panels');
+  const panelEls = {};
+  TABS.forEach(([id, label, badge]) => {
+    tablist.append(el('button', { role: 'tab', id: 'tab-' + id, 'aria-controls': 'p-' + id, 'aria-selected': 'false', tabindex: '-1',
+      onclick: () => { location.hash = id; } }, label, badge ? el('span', { class: 'badge' }, badge) : null));
+    const p = el('section', { class: 'panel', id: 'p-' + id, role: 'tabpanel', 'aria-labelledby': 'tab-' + id, hidden: true });
+    panelEls[id] = p; panels.append(p);
+  });
+  tablist.addEventListener('keydown', e => {
+    const tabs = [...tablist.children]; const i = tabs.indexOf(document.activeElement);
+    if (i < 0) return;
+    const j = e.key === 'ArrowRight' ? (i + 1) % tabs.length : e.key === 'ArrowLeft' ? (i - 1 + tabs.length) % tabs.length : -1;
+    if (j >= 0) { tabs[j].focus(); tabs[j].click(); e.preventDefault(); }
+  });
+  function select(id) {
+    if (!panelEls[id]) id = 'board';
+    for (const [k, p] of Object.entries(panelEls)) p.hidden = k !== id;
+    [...tablist.children].forEach(b => { const on = b.id === 'tab-' + id; b.setAttribute('aria-selected', on); b.tabIndex = on ? 0 : -1; });
+  }
+  window.addEventListener('hashchange', () => select(location.hash.slice(1)));
+
+  /* ====================================================== BOARD */
+  const board = { chip: 'found', cell: null, alert: null };
+  (function buildBoard() {
+    const p = panelEls.board;
+    p.append(el('h2', {}, 'Eleven checks, four clients, one run'),
+      el('p', { class: 'sub' }, 'Each column is a fictional client. Each row is a SQL check. The warehouse has eleven known faults in it; the checks do not know where. Click a cell to see what it found, in plain language.'));
+    const left = el('div', { class: 'card sticky' }), right = el('div', {});
+    const table = el('table', { class: 'matrix' });
+    table.append(el('thead', {}, el('tr', {}, el('th', {}, 'Check'), R.clients.map(c => el('th', {}, c.name, el('small', {}, c.vertical))))));
+    const tb = el('tbody');
+    R.checks.forEach(ch => {
+      const tr = el('tr', {}, el('th', { scope: 'row' }, ch.label, el('small', {}, ch.purpose)));
+      R.clients.forEach(c => {
+        const cell = R.matrix[ch.id][c.id];
+        const glyph = { pass: '✓', fail: '✗', early: '!', followon: '↳' }[cell.status];
+        const text = cell.status === 'pass' ? '' : cell.sources.map(s => SRC[s]).join(', ');
+        const label = `${ch.label}, ${c.name}: ${{ pass: 'passed', fail: 'fault found', early: 'early warning', followon: 'follow-on symptom' }[cell.status]}`;
+        const b = el('button', { class: 'cell ' + cell.status, 'aria-pressed': 'false', 'aria-label': label, 'data-check': ch.id, 'data-client': c.id,
+          onclick: () => { board.cell = (board.cell && board.cell.check === ch.id && board.cell.client === c.id) ? null : { check: ch.id, client: c.id }; board.alert = null; renderAlerts(); } },
+          el('span', { class: 'g' }, glyph), text ? el('span', { class: 't' }, text) : null);
+        tr.append(el('td', {}, b));
+      });
+      tb.append(tr);
+    });
+    table.append(tb);
+    left.append(el('div', { style: 'overflow-x:auto' }, table),
+      el('div', { class: 'legend' },
+        el('span', {}, el('i', { class: 'k-pass' }, '✓'), 'passed'),
+        el('span', {}, el('i', { class: 'k-fail' }, '✗'), 'a hidden fault, found'),
+        el('span', {}, el('i', { class: 'k-early' }, '!'), 'early warning, before damage'),
+        el('span', {}, el('i', { class: 'k-fail' }, '↳'), 'follow-on symptom of a fault found elsewhere')));
+    const chips = el('div', { class: 'chips', id: 'chips' });
+    const count = f => R.alerts.filter(a => f(a)).length;
+    [['found', `Faults found · ${count(a => a.status === 'caught')}`], ['early', `Early warning · ${count(a => a.status === 'early')}`],
+     ['followon', `Follow-on symptoms · ${count(a => a.status === 'followon')}`], ['all', `All · ${R.alerts.length}`]].forEach(([id, label]) =>
+      chips.append(el('button', { class: 'chip', 'data-chip': id, 'aria-pressed': 'false', onclick: () => { board.chip = id; board.cell = null; board.alert = null; renderAlerts(); } }, label)));
+    right.append(chips, el('div', { class: 'alerts', id: 'alerts' }));
+    p.append(el('div', { class: 'grid2' }, left, right));
+  })();
+
+  function alertCard(a) {
+    const sev = { high: ['▲', 'High'], med: ['◆', 'Medium'], low: ['●', 'Low'] }[a.severity];
+    const cls = a.status === 'early' ? 'early' : a.status === 'followon' ? 'followon' : '';
+    const key = R.faults.find(f => f.id === a.fault);
+    return el('article', { class: 'alert ' + cls, id: 'alert-' + a.id },
+      el('header', {}, el('span', { class: 'sev ' + a.severity }, `${sev[0]} ${sev[1]}`), el('span', {}, `${C[a.client].name} · ${SRC[a.source]}`),
+        el('span', { class: 'pill' }, R.checks.find(c => c.id === a.check).label), el('span', { class: 'mono' }, a.id)),
+      el('h4', {}, a.headline),
+      el('p', { class: 'saw' }, a.saw),
+      el('details', { open: board.alert === a.id }, el('summary', {}, 'Why it matters, and the fix'),
+        el('dl', {},
+          el('dt', {}, 'Why it matters'), el('dd', {}, a.why),
+          el('dt', {}, 'Fix'), el('dd', {}, a.fix, ' ', el('span', { class: 'pill' }, a.owner)),
+          key ? [el('dt', {}, 'Answer key'), el('dd', { class: 'note' }, `${key.id}: ${key.what}`)] : null)));
+  }
+  function renderAlerts() {
+    const box = $('#alerts');
+    $('#chips').querySelectorAll('.chip').forEach(b => b.setAttribute('aria-pressed', String(!board.cell && !board.alert && b.dataset.chip === board.chip)));
+    document.querySelectorAll('.cell').forEach(b => b.setAttribute('aria-pressed', String(!!board.cell && b.dataset.check === board.cell.check && b.dataset.client === board.cell.client)));
+    let list;
+    if (board.alert) list = R.alerts.filter(a => a.id === board.alert);
+    else if (board.cell) list = R.alerts.filter(a => a.check === board.cell.check && a.client === board.cell.client);
+    else list = R.alerts.filter(a => board.chip === 'all' || (board.chip === 'found' && a.status === 'caught') || a.status === board.chip);
+    box.replaceChildren();
+    if (board.cell || board.alert) {
+      const what = board.alert ? `Alert ${board.alert}` : `${R.checks.find(c => c.id === board.cell.check).label} · ${C[board.cell.client].name}`;
+      box.append(el('div', { class: 'chips' }, el('span', { class: 'pill' }, what), el('button', { class: 'chip', onclick: () => { board.cell = null; board.alert = null; renderAlerts(); } }, 'Clear')));
+    }
+    if (!list.length) box.append(el('p', { class: 'empty' }, '✓ This check passed. It found nothing, and nothing was hidden there.'));
+    list.forEach(a => box.append(alertCard(a)));
+  }
+  renderAlerts();
+
+  /* ====================================================== GA4 */
+  (function buildGa4() {
+    const p = panelEls.ga4;
+    const rows = R.charts.ga4.cobalt, LIM = 1e6;
+    p.append(el('h2', {}, 'The GA4 export gap nobody gets paged for'),
+      el('p', { class: 'sub' }, 'Standard GA4 properties have a daily BigQuery export limit of 1,000,000 events. A property that keeps exceeding it has the daily export paused, and previous days are not reprocessed. The email goes to GA4 property editors and administrators, which is often not whoever owns the dashboard.'));
+    const avg7 = rows.map((_, i) => { const s = rows.slice(Math.max(0, i - 6), i + 1); return s.reduce((a, r) => a + r.collected, 0) / s.length; });
+    const iWarn = avg7.findIndex(v => v >= 0.85 * LIM), iMiss = rows.findIndex(r => !r.exported);
+    const W = 980, H = 380, mg = { l: 62, r: 20, t: 40, b: 34 };
+    const svg = frame(W, H, 'Daily GA4 events for Cobalt Mobile against the 1,000,000 export limit');
+    svg.append(hatch());
+    const x0 = mg.l, x1 = W - mg.r, y0 = H - mg.b, y1 = mg.t;
+    const y = lin(0, 1.4e6, y0, y1), step = (x1 - x0) / rows.length, bw = step * 0.68;
+    const cx = i => x0 + step * (i + .5);
+    yAxis(svg, y, [0, 250e3, 500e3, 750e3, 1e6, 1.25e6], x0, x1, v => v === 0 ? '0' : v >= 1e6 ? (v / 1e6) + 'M' : (v / 1e3) + 'k');
+    rows.forEach((r, i) => {
+      const bar = sv('rect', { x: cx(i) - bw / 2, y: y(r.collected), width: bw, height: y0 - y(r.collected), rx: 2,
+        style: r.exported ? 'fill:var(--bar)' : 'fill:url(#hatch);stroke:var(--crit);stroke-width:1.2' });
+      svg.append(bar);
+      const hit = sv('rect', { x: x0 + step * i, y: y1, width: step, height: y0 - y1, fill: 'transparent' });
+      hover(hit, () => `<b>${dl(r.date)}</b><br>${fmt(r.collected)} events collected<br>7-day average ${fmt(avg7[i])}<br>${r.exported ? 'Export loaded' : '<b>Export missing, not reprocessed</b>'}`);
+      svg.append(hit);
+    });
+    svg.append(sv('line', { class: 'base', x1: x0, x2: x1, y1: y0, y2: y0 }));
+    svg.append(sv('line', { x1: x0, x2: x1, y1: y(LIM), y2: y(LIM), style: 'stroke:var(--ink);stroke-width:1.5;stroke-dasharray:6 4' }));
+    svg.append(sv('text', { class: 'lbl', x: x0 + 6, y: y(LIM) - 6 }, '1,000,000 events/day: standard export limit'));
+    svg.append(sv('line', { x1: x0, x2: x1, y1: y(.85 * LIM), y2: y(.85 * LIM), style: 'stroke:var(--warn);stroke-width:1.5;stroke-dasharray:2 4' }));
+    svg.append(sv('text', { x: x0 + 6, y: y(.85 * LIM) - 6, style: 'fill:var(--warn);font-weight:600' }, '850k: early-warning line (85% of the limit)'));
+    svg.append(sv('polyline', { fill: 'none', style: 'stroke:var(--s1);stroke-width:2.5;stroke-linejoin:round', points: avg7.map((v, i) => `${cx(i)},${y(v)}`).join(' ') }));
+    xLabels(svg, rows.map((_, i) => cx(i)), rows.map(r => dl(r.date)), y0 + 20, 3);
+    if (iWarn >= 0) {
+      svg.append(sv('line', { x1: cx(iWarn), x2: cx(iWarn), y1: y1 - 6, y2: y0, style: 'stroke:var(--warn);stroke-width:1.5' }));
+      svg.append(sv('text', { class: 'lbl', x: cx(iWarn) - 6, y: y1 - 14, 'text-anchor': 'end', style: 'fill:var(--warn)' }, `! Warning fires ${dl(rows[iWarn].date)}`));
+    }
+    if (iMiss >= 0) {
+      svg.append(sv('line', { x1: cx(iMiss) - step / 2, x2: cx(iMiss) - step / 2, y1: y1 - 6, y2: y0, style: 'stroke:var(--crit);stroke-width:1.5' }));
+      svg.append(sv('text', { class: 'lbl', x: cx(iMiss) - step / 2 + 6, y: y1 - 14, style: 'fill:var(--crit)' }, `✗ First missing export ${dl(rows[iMiss].date)}`));
+    }
+    const card = el('div', { class: 'card' },
+      el('h3', {}, 'Cobalt Mobile: events collected per day'),
+      el('p', { class: 'cap' }, `The 7-day average crossed 85% of the limit on ${dl(rows[iWarn].date)}. The first day of export went missing on ${dl(rows[iMiss].date)}. That is ${iMiss - iWarn} days in which someone could have acted.`),
+      legend([['', 'background:var(--bar)', 'Daily events, export loaded'], ['', 'background:repeating-linear-gradient(45deg,var(--crit-bg) 0 3px,var(--crit) 3px 5px)', 'Daily events, export missing'],
+        ['line', 'background:var(--s1)', '7-day average'], ['dash', 'color:var(--warn)', '85% line'], ['dash', 'color:var(--ink)', '1M limit']]),
+      svg,
+      tableView(['Day', 'Events collected', '7-day avg', 'Export'], rows.map((r, i) => [dl(r.date), fmt(r.collected), fmt(avg7[i]), r.exported ? 'loaded' : 'MISSING'])));
+    const other = Object.keys(R.charts.ga4).map(id => {
+      const rs = R.charts.ga4[id]; const a7 = rs.map((_, i) => { const s = rs.slice(Math.max(0, i - 6), i + 1); return s.reduce((a, r) => a + r.collected, 0) / s.length; });
+      const peak = Math.max(...a7);
+      return [C[id].name, fmt(peak), pc(peak / LIM, 0), peak >= .85 * LIM ? '! Over the line' : '✓ Headroom'];
+    });
+    const side = el('div', {},
+      el('div', { class: 'card' }, el('h3', {}, 'Headroom across the four properties'),
+        el('p', { class: 'cap' }, 'Peak 7-day average of events collected, against the 1,000,000 limit.'),
+        el('table', { class: 'plain' }, el('thead', {}, el('tr', {}, ['Client', 'Peak events/day', 'of limit', ''].map(h => el('th', {}, h)))),
+          el('tbody', {}, other.map(r => el('tr', {}, r.map((c, i) => el('td', { class: i === 1 || i === 2 ? 'num' : (i === 3 && c.startsWith('!') ? 'bad' : '') }, c))))))),
+      el('div', { class: 'card' }, el('h3', {}, 'What is documented, and what is assumed'),
+        el('ul', { class: 'tight' },
+          el('li', {}, el('b', {}, 'Documented: '), 'standard properties have a daily export limit of 1M events; consistent excess pauses the daily export; previous days are not reprocessed; editors and admins are emailed.'),
+          el('li', {}, el('b', {}, 'Assumed: '), 'the exact pause trigger is not published. This model pauses after four consecutive days over 1M.'),
+          el('li', {}, el('b', {}, 'Recovery: '), 'event-level rows for the gap are not coming back. Aggregates can be rebuilt from the GA4 Data API and should be marked as rebuilt.'))));
+    p.append(el('div', { class: 'grid2 wide' }, card, side));
+  })();
+
+  /* ====================================================== SHIFT */
+  (function buildShift() {
+    const p = panelEls.shift; const rows = R.charts.shift;
+    const a = R.alerts.find(x => x.check === 'day_boundary');
+    p.append(el('h2', {}, 'Totals match. The days do not.'),
+      el('p', { class: 'sub' }, 'Brightline Health\'s Meta account reports in Pacific time. The pipeline groups hourly spend by UTC date. A monthly eyeball check passes because the period total is within a fraction of a percent, but most individual days are wrong.'));
+    const kp = el('div', { class: 'kpis' },
+      el('div', { class: 'kpi' }, el('b', {}, `${a.evidence.days_off} of 28`), el('span', {}, 'days off by more than 1%')),
+      el('div', { class: 'kpi' }, el('b', {}, pc(Math.abs(a.evidence.period_err), 2)), el('span', {}, 'period total error')),
+      el('div', { class: 'kpi' }, el('b', {}, pc(a.evidence.worst), ), el('span', {}, 'worst single day')),
+      el('div', { class: 'kpi' }, el('b', {}, a.evidence.net_to_gross.toFixed(2)), el('span', {}, 'net ÷ gross error: spend moved, not lost')));
+
+    // hours
+    const hrs = R.charts.hours, eve = hrs.slice(17).reduce((s, v) => s + v, 0);
+    const Wh = 480, Hh = 260, mh = { l: 40, r: 10, t: 44, b: 30 };
+    const sh = frame(Wh, Hh, 'Share of daily spend by Pacific hour');
+    const yh = lin(0, .09, Hh - mh.b, mh.t), sx = (Wh - mh.l - mh.r) / 24;
+    yAxis(sh, yh, [0, .03, .06, .09], mh.l, Wh - mh.r, v => (v * 100).toFixed(0) + '%');
+    hrs.forEach((v, h) => {
+      const late = h >= 17;
+      const r = sv('rect', { x: mh.l + sx * h + 2, y: yh(v), width: sx - 4, height: Hh - mh.b - yh(v), rx: 2, style: late ? 'fill:var(--s2)' : 'fill:var(--bar)' });
+      sh.append(r);
+      const hit = sv('rect', { x: mh.l + sx * h, y: mh.t, width: sx, height: Hh - mh.b - mh.t, fill: 'transparent' });
+      hover(hit, () => `<b>${h}:00 to ${h + 1}:00 Pacific</b><br>${pc(v)} of the day\'s spend<br>${late ? 'Stored under the NEXT UTC date' : 'Stored under the same UTC date'}`);
+      sh.append(hit);
+    });
+    sh.append(sv('line', { class: 'base', x1: mh.l, x2: Wh - mh.r, y1: Hh - mh.b, y2: Hh - mh.b }));
+    xLabels(sh, hrs.map((_, h) => mh.l + sx * h + sx / 2), hrs.map((_, h) => h), Hh - mh.b + 16, 3);
+    sh.append(sv('text', { class: 'lbl', x: Wh - mh.r, y: 14, 'text-anchor': 'end' }, `5 pm to midnight: ${pc(eve, 0)} of the day's spend`));
+    sh.append(sv('text', { x: Wh - mh.r, y: 29, 'text-anchor': 'end' }, 'lands on tomorrow\'s UTC date'));
+    const cardH = el('div', { class: 'card' }, el('h3', {}, 'Why: a Pacific day does not line up with a UTC day'),
+      el('p', { class: 'cap' }, 'Pacific time is UTC-7 in October, so local 5 pm is UTC midnight. Share of a day\'s spend by local hour (synthetic evening-heavy curve).'), sh);
+
+    // lines
+    const W = 980, H = 300, mg = { l: 62, r: 120, t: 18, b: 30 };
+    const sl = frame(W, H, 'Daily Meta spend: platform total against warehouse for Brightline Health');
+    const vals = rows.flatMap(r => [r.control, r.warehouse]);
+    const lo = Math.floor(Math.min(...vals) / 250) * 250 - 250, hi = Math.ceil(Math.max(...vals) / 250) * 250 + 250;
+    const yl = lin(lo, hi, H - mg.b, mg.t), step = (W - mg.l - mg.r) / (rows.length - 1), xl = i => mg.l + step * i;
+    const ticks = []; for (let t = Math.ceil(lo / 500) * 500; t <= hi; t += 500) ticks.push(t);
+    yAxis(sl, yl, ticks, mg.l, W - mg.r, v => '$' + fmt(v));
+    sl.append(sv('line', { class: 'base', x1: mg.l, x2: W - mg.r, y1: H - mg.b, y2: H - mg.b }));
+    sl.append(sv('polyline', { fill: 'none', style: 'stroke:var(--ink2);stroke-width:2;stroke-linejoin:round', points: rows.map((r, i) => `${xl(i)},${yl(r.control)}`).join(' ') }));
+    sl.append(sv('polyline', { fill: 'none', style: 'stroke:var(--s1);stroke-width:2;stroke-linejoin:round', points: rows.map((r, i) => `${xl(i)},${yl(r.warehouse)}`).join(' ') }));
+    const ends = [{ t: 'Platform', y: yl(rows.at(-1).control) + 4, st: '' }, { t: 'Warehouse', y: yl(rows.at(-1).warehouse) + 4, st: 'fill:var(--s1)' }].sort((a, b) => a.y - b.y);
+    for (let i = 1; i < ends.length; i++) if (ends[i].y - ends[i - 1].y < 16) ends[i].y = ends[i - 1].y + 16;
+    ends.forEach(e => sl.append(sv('text', { class: 'lbl', x: W - mg.r + 8, y: e.y, style: e.st }, e.t)));
+    xLabels(sl, rows.map((_, i) => xl(i)), rows.map(r => dl(r.date)), H - mg.b + 18, 3);
+    rows.forEach((r, i) => {
+      const hit = sv('rect', { x: xl(i) - step / 2, y: mg.t, width: step, height: H - mg.t - mg.b, fill: 'transparent' });
+      hover(hit, () => `<b>${dl(r.date)}</b><br>Platform $${fmt(r.control)}<br>Warehouse $${fmt(r.warehouse)}<br>Error ${(r.err * 100).toFixed(1)}%`);
+      sl.append(hit);
+    });
+
+    // error bars
+    const He = 205, me = { l: 62, r: 120, t: 14, b: 36 };
+    const se = frame(W, He, 'Daily error of the warehouse against the platform total, percent');
+    const ye = lin(-.2, .2, He - me.b, me.t);
+    yAxis(se, ye, [-.2, -.1, 0, .1, .2], me.l, W - me.r, v => (v > 0 ? '+' : '') + (v * 100).toFixed(0) + '%');
+    se.append(sv('rect', { x: me.l, width: W - me.l - me.r, y: ye(.01), height: ye(-.01) - ye(.01), style: 'fill:var(--grid);opacity:.9' }));
+    se.append(sv('text', { x: W - me.r + 8, y: ye(0) + 4 }, '±1% tolerance'));
+    const bw = step * .62;
+    rows.forEach((r, i) => {
+      const out = Math.abs(r.err) > .01, top = Math.min(ye(0), ye(r.err)), h = Math.abs(ye(r.err) - ye(0));
+      se.append(sv('rect', { x: xl(i) - bw / 2, y: top, width: bw, height: Math.max(h, 1), rx: 2, style: out ? 'fill:var(--crit)' : 'fill:var(--bar)' }));
+      const hit = sv('rect', { x: xl(i) - step / 2, y: me.t, width: step, height: He - me.t - me.b, fill: 'transparent' });
+      hover(hit, () => `<b>${dl(r.date)}</b><br>${(r.err * 100).toFixed(1)}% ${out ? '✗ outside tolerance' : '✓ within tolerance'}`);
+      se.append(hit);
+    });
+    se.append(sv('line', { class: 'base', x1: me.l, x2: W - me.r, y1: ye(0), y2: ye(0) }));
+    xLabels(se, rows.map((_, i) => xl(i)), rows.map(r => dl(r.date)), He - me.b + 18, 3);
+
+    const cardL = el('div', { class: 'card' }, el('h3', {}, 'Brightline Health, Meta: platform total against warehouse'),
+      el('p', { class: 'cap' }, 'The two lines wander around each other. The error below is spend that moved to the wrong day.'),
+      legend([['line', 'background:var(--ink2)', 'Platform total'], ['line', 'background:var(--s1)', 'Warehouse']]), sl,
+      el('h3', { style: 'margin-top:14px' }, 'Daily error'),
+      legend([['', 'background:var(--crit)', '✗ outside ±1%'], ['', 'background:var(--bar)', '✓ within tolerance']]), se,
+      tableView(['Day', 'Platform $', 'Warehouse $', 'Error'], rows.map(r => [dl(r.date), fmt(r.control), fmt(r.warehouse), (r.err * 100).toFixed(1) + '%'])));
+    const why = el('div', { class: 'card' }, el('h3', {}, 'How the check tells this apart from the others'),
+      el('table', { class: 'plain' }, el('thead', {}, el('tr', {}, ['Fault', 'Days off', 'Signed errors', 'Period total'].map(h => el('th', {}, h)))),
+        el('tbody', {}, [['Time-zone shift', 'many', 'cancel out', 'about right'], ['Duplicate load', 'few', 'all positive', 'too high'], ['Stale or partial load', 'few', 'all negative', 'too low']]
+          .map(r => el('tr', {}, r.map(c => el('td', {}, c)))))),
+      el('p', { class: 'note' }, `Rule: at least 5 days off by more than 1%, period total within 3%, and |net error| under 25% of gross error. Fix: ${a.fix}`));
+    p.append(kp, el('div', { class: 'grid2 wide' }, cardL, el('div', {}, cardH, why)));
+  })();
+
+  /* ====================================================== CHANNELS */
+  (function buildChannels() {
+    const p = panelEls.channels; const rows = R.charts.channel;
+    const a = R.alerts.find(x => x.check === 'utm_channel');
+    p.append(el('h2', {}, 'The UTM is there. The spend is filed as organic.'),
+      el('p', { class: 'sub' }, 'GA4\'s default Paid Social channel needs a social source and a paid-style medium (cp*, ppc, retargeting, paid*). A medium of "social" does not qualify, so the sessions go to Organic Social. A QA step that only asks "is there a UTM?" passes.'));
+    const W = 980, H = 320, mg = { l: 56, r: 20, t: 26, b: 34 };
+    const svg = frame(W, H, 'Daily sessions for one paid Meta campaign by GA4 channel');
+    const max = Math.max(...rows.map(r => r.paid + r.organic));
+    const y = lin(0, Math.ceil(max / 200) * 200, H - mg.b, mg.t), step = (W - mg.l - mg.r) / rows.length, bw = step * .72, cx = i => mg.l + step * (i + .5);
+    yAxis(svg, y, [0, 400, 800, 1200], mg.l, W - mg.r, fmt);
+    const iFlip = rows.findIndex(r => r.organic > 0);
+    rows.forEach((r, i) => {
+      const hP = y(0) - y(r.paid), hO = y(0) - y(r.organic);
+      if (r.paid) svg.append(sv('rect', { x: cx(i) - bw / 2, y: y(r.paid), width: bw, height: hP, rx: 2, style: 'fill:var(--s1);stroke:var(--surface);stroke-width:2' }));
+      if (r.organic) svg.append(sv('rect', { x: cx(i) - bw / 2, y: y(r.paid + r.organic), width: bw, height: hO, rx: 2, style: 'fill:var(--s2);stroke:var(--surface);stroke-width:2' }));
+      const hit = sv('rect', { x: cx(i) - step / 2, y: mg.t, width: step, height: H - mg.t - mg.b, fill: 'transparent' });
+      hover(hit, () => `<b>${dl(r.date)}</b><br>Paid Social ${fmt(r.paid)}<br>Organic Social ${fmt(r.organic)}`);
+      svg.append(hit);
+    });
+    svg.append(sv('line', { class: 'base', x1: mg.l, x2: W - mg.r, y1: y(0), y2: y(0) }));
+    xLabels(svg, rows.map((_, i) => cx(i)), rows.map(r => dl(r.date)), H - mg.b + 18, 3);
+    if (iFlip > 0) {
+      svg.append(sv('line', { x1: cx(iFlip) - step / 2, x2: cx(iFlip) - step / 2, y1: mg.t - 6, y2: y(0), style: 'stroke:var(--ink);stroke-width:1.5;stroke-dasharray:4 3' }));
+      svg.append(sv('text', { class: 'lbl', x: cx(iFlip) - step / 2 + 6, y: mg.t - 8 }, `${dl(rows[iFlip].date)}: utm_medium changed to "social"`));
+    }
+    const card = el('div', { class: 'card' }, el('h3', {}, a.evidence.campaign),
+      el('p', { class: 'cap' }, `${fmt(a.evidence.misfiled)} of ${fmt(a.evidence.total)} sessions (${pc(a.evidence.misfiled / a.evidence.total, 0)}) were filed as Organic Social. The campaign did not change. The tag did.`),
+      legend([['', 'background:var(--s1)', 'Paid Social'], ['', 'background:var(--s2)', 'Organic Social']]), svg,
+      tableView(['Day', 'Paid Social', 'Organic Social'], rows.map(r => [dl(r.date), fmt(r.paid), fmt(r.organic)])));
+
+    // before/after
+    const ch = R.charts.alder_channels.map(c => ({ ...c, d: c.before ? (c.after - c.before) / c.before : 0 })).sort((a, b) => Math.abs(b.d) - Math.abs(a.d));
+    const maxd = Math.max(...ch.map(c => Math.abs(c.d)), .01);
+    const colorFor = n => n === 'Paid Social' ? 'var(--s1)' : n === 'Organic Social' ? 'var(--s2)' : 'var(--bar)';
+    const rowsEl = ch.map(c => {
+      const w = Math.abs(c.d) / maxd * 50, right = c.d >= 0;
+      return el('div', { class: 'delta-row' }, el('span', {}, c.channel),
+        el('div', { class: 'track' }, el('span', { class: 'mid' }), el('span', { class: 'fill', style: `background:${colorFor(c.channel)};width:${w}%;${right ? 'left:50%' : 'right:50%'}` })),
+        el('span', { class: 'num mono' }, (c.d >= 0 ? '▲ +' : '▼ ') + (c.d * 100).toFixed(0) + '%'));
+    });
+    const side = el('div', {},
+      el('div', { class: 'card' }, el('h3', {}, 'What the client report would say'),
+        el('p', { class: 'cap' }, 'Alder & Finch, sessions by channel: 14 days before the change against 14 days after.'), ...rowsEl,
+        el('p', { class: 'note' }, 'Paid Social looks like it fell and Organic Social looks like it took off. Neither is true. Budget gets moved on this.')),
+      el('div', { class: 'card' }, el('h3', {}, 'The rule, tested'),
+        el('p', { class: 'cap' }, `${R.unit_tests.filter(t => t.ok).length} of ${R.unit_tests.length} source and medium cases give the channel Google's published rules say they should. This tests the SQL against the written rules, not against GA4's own engine.`),
+        el('details', { class: 'table' }, el('summary', {}, 'Show the cases'), el('div', { class: 'scroll' },
+          el('table', { class: 'data' }, el('thead', {}, el('tr', {}, ['source / medium', 'expected', 'SQL gave', ''].map(h => el('th', {}, h)))),
+            el('tbody', {}, R.unit_tests.map(t => el('tr', {}, el('td', {}, `${t.source} / ${t.medium}`), el('td', {}, t.expected), el('td', {}, t.got), el('td', { class: t.ok ? 'ok' : 'bad' }, t.ok ? '✓' : '✗')))))))),
+      el('div', { class: 'card' }, el('h3', {}, 'Fix'), el('p', {}, a.fix), el('span', { class: 'pill' }, a.owner)));
+    p.append(el('div', { class: 'grid2 wide' }, card, side));
+  })();
+
+  /* ====================================================== CONVERSIONS */
+  (function buildConv() {
+    const p = panelEls.conversions;
+    const alder = R.charts.actions.alder; const a = R.alerts.find(x => x.check === 'definition' && x.client === 'alder');
+    p.append(el('h2', {}, 'One purchase, three names, one wrong dashboard'),
+      el('p', { class: 'sub' }, 'Meta returns a purchase under several overlapping action types. Adding them counts the same purchase more than once. Separately, a dashboard field can be pinned to an attribution window Meta no longer returns. Both live in the metric registry, so both can be checked.'));
+    const bars = [['purchase', alder.purchase, 'bar'], ['omni_purchase', alder.omni_purchase, 'bar'], ['offsite_conversion.fb_pixel_purchase', alder['offsite_conversion.fb_pixel_purchase'], 'bar'],
+      ['What the dashboard field adds up', alder.purchase + alder.omni_purchase + alder['offsite_conversion.fb_pixel_purchase'], 'bad']];
+    const W = 760, H = 250, mg = { l: 250, r: 90, t: 12, b: 24 };
+    const svg = frame(W, H, 'Alder and Finch Meta purchases by action type and the dashboard sum');
+    const xs = lin(0, Math.ceil(bars[3][1] / 1000) * 1000, mg.l, W - mg.r), bh = 34, gap = 16;
+    bars.forEach(([name, v, kind], i) => {
+      const yy = mg.t + i * (bh + gap);
+      svg.append(sv('text', { x: mg.l - 10, y: yy + bh / 2 + 4, 'text-anchor': 'end', class: kind === 'bad' ? 'lbl' : '' }, name));
+      svg.append(sv('rect', { x: mg.l, y: yy, width: xs(v) - mg.l, height: bh, rx: 4, style: kind === 'bad' ? 'fill:var(--crit)' : 'fill:var(--bar)' }));
+      svg.append(sv('text', { class: 'lbl', x: xs(v) + 8, y: yy + bh / 2 + 4 }, fmt(v) + (kind === 'bad' ? `  ✗ ${(v / alder.purchase).toFixed(1)}x` : '')));
+      const hit = sv('rect', { x: 0, y: yy - 4, width: W, height: bh + 8, fill: 'transparent' });
+      hover(hit, () => `<b>${esc(name)}</b><br>${fmt(v)} purchases (de-duplicated rows)`); svg.append(hit);
+    });
+    svg.append(sv('line', { class: 'base', x1: mg.l, x2: mg.l, y1: mg.t, y2: H - mg.b }));
+    const card = el('div', { class: 'card' }, el('h3', {}, 'Alder & Finch: Meta purchases, 28 days'),
+      el('p', { class: 'cap' }, `The conversions field reads ${fmt(a.evidence.dashboard)} against ${fmt(a.evidence.canonical)} real purchases, so ROAS is ${a.evidence.inflation.toFixed(1)}x too high and CPA ${a.evidence.inflation.toFixed(1)}x too low.`),
+      svg, tableView(['Action type', 'Purchases'], bars.map(b => [b[0], fmt(b[1])])));
+
+    const acts = R.charts.actions;
+    const t1 = el('div', { class: 'card' }, el('h3', {}, 'The raw data looks like this for every client'),
+      el('p', { class: 'cap' }, 'The overlap is in what Meta returns. Only the way a dashboard field is configured makes it wrong.'),
+      el('div', { style: 'overflow-x:auto' }, el('table', { class: 'plain' }, el('thead', {}, el('tr', {}, ['Client', 'purchase', 'omni_purchase', 'fb_pixel_purchase', 'Sum ÷ purchase'].map((h, i) => el('th', { class: i ? 'num' : '' }, h)))),
+        el('tbody', {}, Object.keys(acts).map(id => {
+          const r = acts[id], s = r.purchase + r.omni_purchase + r['offsite_conversion.fb_pixel_purchase'];
+          return el('tr', {}, el('td', {}, C[id].name), el('td', { class: 'num' }, fmt(r.purchase)), el('td', { class: 'num' }, fmt(r.omni_purchase)), el('td', { class: 'num' }, fmt(r['offsite_conversion.fb_pixel_purchase'])), el('td', { class: 'num' }, (s / r.purchase).toFixed(2) + 'x'));
+        })))));
+    const reg = R.charts.registry.filter(r => r.platform === 'meta');
+    const t2 = el('div', { class: 'card' }, el('h3', {}, 'The metric registry: what each dashboard field reads'),
+      el('p', { class: 'cap' }, 'Meta removed the 7d_view and 28d_view windows from the Insights API on 12 January 2026.'),
+      el('div', { style: 'overflow-x:auto' }, el('table', { class: 'plain' }, el('thead', {}, el('tr', {}, ['Client', 'Action types', 'Window', ''].map(h => el('th', {}, h)))),
+        el('tbody', {}, reg.map(r => {
+          const bad = R.alerts.find(x => x.check === 'definition' && x.client === r.client);
+          return el('tr', {}, el('td', {}, C[r.client].name), el('td', { class: 'mono', style: 'font-size:12px;word-break:break-all' }, r.action_types.split(',').join(', ')),
+            el('td', { class: 'mono' }, r.window), el('td', { class: bad ? 'bad' : 'ok' }, bad ? '✗ ' + (bad.evidence.kind === 'overlap' ? 'overlap' : 'dead window') : '✓'));
+        })))),
+      el('p', { class: 'note' }, 'Fix: ' + a.fix + ' For Cobalt: ' + R.alerts.find(x => x.check === 'definition' && x.client === 'cobalt').fix));
+    p.append(el('div', { class: 'grid2' }, card, el('div', {}, t1, t2)));
+  })();
+
+  /* ====================================================== QUEUE */
+  (function buildQueue() {
+    const p = panelEls.queue;
+    p.append(el('h2', {}, 'A request queue that ranks itself'),
+      el('p', { class: 'sub' }, 'Reporting requests arrive from several clients at once. A transparent score decides what to do first and what to promise, and any request that touches wrong numbers on a live dashboard outranks a new feature. These eight requests are invented; three of them are the board alerts seen from the client\'s side.'));
+    const tb = el('tbody');
+    R.triage.forEach((t, i) => {
+      const cls = t.sla === 'Today' ? 'today' : t.sla === 'Within 48 hours' ? 'h48' : 'batch';
+      const glyph = t.sla === 'Today' ? '▲' : t.sla === 'Within 48 hours' ? '◆' : '●';
+      tb.append(el('tr', {}, el('td', { class: 'num' }, String(i + 1)),
+        el('td', {}, el('b', {}, t.title), el('div', { class: 'note' }, `${t.client_name} · tier ${t.tier} · due in ${t.due} day${t.due === 1 ? '' : 's'} · ~${t.effort} h`)),
+        el('td', {}, el('div', { class: 'scorebar', title: 'score ' + t.score }, el('i', { style: `width:${t.score * 100}%` })), el('span', { class: 'note mono' }, t.score.toFixed(2))),
+        el('td', { class: 'sla ' + cls }, `${glyph} ${t.sla}`),
+        el('td', {}, t.alert ? el('button', { class: 'chip', onclick: () => { board.alert = t.alert; board.cell = null; renderAlerts(); location.hash = 'board'; setTimeout(() => { const n = document.getElementById('alert-' + t.alert); if (n) n.scrollIntoView({ block: 'center' }); }, 30); } }, 'Alert ' + t.alert) : el('span', { class: 'note' }, 'none'))));
+    });
+    const list = el('div', { class: 'card' }, el('div', { style: 'overflow-x:auto' }, el('table', { class: 'plain' },
+      el('thead', {}, el('tr', {}, ['#', 'Request', 'Priority score', 'Reply by', 'Linked to'].map(h => el('th', {}, h)))), tb)));
+    const how = el('div', { class: 'card' }, el('h3', {}, 'How the score is built'),
+      el('table', { class: 'plain' }, el('thead', {}, el('tr', {}, ['Factor', 'Weight', 'Reads as'].map(h => el('th', {}, h)))),
+        el('tbody', {}, [['Wrong numbers live', '25%', '1 if a dashboard is showing bad data now'], ['Deadline', '30%', '1 today, falling to 0 at 14 days'], ['Blast radius', '25%', 'dashboards affected, capped at 4'],
+          ['Client tier', '10%', 'A 1.0, B 0.6, C 0.3'], ['Cheap to do', '10%', 'falls to 0 at 12 hours']].map(r => el('tr', {}, r.map(c => el('td', {}, c)))))),
+      el('p', { class: 'note' }, 'Today at 0.70 and above, within 48 hours at 0.45 and above, otherwise the weekly batch. Hard rule: anything due in two days or less is never batched. The weights are a starting proposal, to be tuned against the agency\'s real SLAs.'),
+      el('p', { class: 'note' }, 'Reporting requests also get the same three questions back: which metric definition, which date range, and who is acting on it. That is how definitions stay consistent across clients.'));
+    p.append(el('div', { class: 'grid2 wide' }, list, how));
+  })();
+
+  /* ====================================================== SQL & SCOPE */
+  (function buildSql() {
+    const p = panelEls.sql;
+    p.append(el('h2', {}, 'The SQL, and exactly what is real'),
+      el('p', { class: 'sub' }, 'Every number on this page comes from these queries. They run in DuckDB. The BigQuery and Snowflake versions are machine translations and have not been run on those warehouses.'));
+    const state = { i: 1, dialect: 'sql' };
+    const code = el('pre', { class: 'code', tabindex: '0' }), title = el('h3', {}), note = el('p', { class: 'note' });
+    const list = el('div', { class: 'filelist' });
+    const names = { staging: 'Staging views', freshness: 'Freshness', completeness: 'Completeness', duplicates: 'Duplicates', reconcile_total: 'Spend reconciliation', day_boundary: 'Day boundary', naming: 'Naming convention', utm_channel: 'UTM to channel', utm_values: 'UTM values', tag_ratio: 'Tag health', definition: 'Metric definition', ga4_headroom: 'GA4 export headroom' };
+    function draw() {
+      const f = R.sql[state.i];
+      title.textContent = f.file;
+      code.textContent = f[state.dialect];
+      note.textContent = state.dialect === 'sql' ? 'DuckDB. This is the version that was executed.' : 'Machine-translated with sqlglot. Not executed on ' + (state.dialect === 'bigquery' ? 'BigQuery' : 'Snowflake') + '; expect to review date functions and window frames.';
+      list.querySelectorAll('button').forEach((b, i) => b.setAttribute('aria-pressed', String(i === state.i)));
+      seg.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.d === state.dialect)));
+    }
+    R.sql.forEach((f, i) => list.append(el('button', { 'aria-pressed': 'false', onclick: () => { state.i = i; draw(); } }, names[f.id] || f.id, el('small', {}, f.file))));
+    const seg = el('div', { class: 'seg' }, [['sql', 'DuckDB (run)'], ['bigquery', 'BigQuery (translated)'], ['snowflake', 'Snowflake (translated)']].map(([d, l]) => el('button', { 'data-d': d, 'aria-pressed': 'false', onclick: () => { state.dialect = d; draw(); } }, l)));
+    const copy = el('button', { class: 'copy', onclick: async e => { try { await navigator.clipboard.writeText(code.textContent); e.target.textContent = 'Copied'; setTimeout(() => e.target.textContent = 'Copy', 1200); } catch (_) { e.target.textContent = 'Select and copy'; } } }, 'Copy');
+    const viewer = el('div', { class: 'card' }, title, el('div', {}, seg, copy), note, code);
+    p.append(el('div', { class: 'sqlgrid' }, list, viewer));
+    draw();
+
+    const measured = el('div', { class: 'card' }, el('h3', {}, 'Measured: real code, reproducible'),
+      el('ul', { class: 'tight' },
+        el('li', {}, `The ${R.checks.length} checks are SQL. Their output is computed, not typed.`),
+        el('li', {}, `Scored against an answer key: ${m.caught} of ${m.faults} faults found, ${m.unexplained} unexplained alerts, ${m.followon} follow-on symptoms that the key allows.`),
+        el('li', {}, `${V.clean.runs} clean seeds × ${m.cells} checks = ${fmt(V.clean.cells)} checks, ${V.clean.alerts} alerts.`),
+        el('li', {}, `${V.faulted.runs} other faulted seeds: ${V.faulted.caught} of ${V.faulted.faults} faults found, ${V.faulted.unexplained} unexplained.`),
+        el('li', {}, `${R.unit_tests.filter(t => t.ok).length} of ${R.unit_tests.length} channel-rule cases match Google's published rules.`),
+        el('li', {}, 'Thresholds (1%, 70%, 50%, 85%) were set before the validation seeds were run and never changed. The first clean run raised the same alert on all 20 seeds; the cause was a generator bug (a fault ramp that was not switched off in clean data), so the generator was fixed, not the threshold.')));
+    const modelled = el('div', { class: 'card' }, el('h3', {}, 'Modelled: invented, and said so'),
+      el('ul', { class: 'tight' },
+        el('li', {}, 'Every spend, click, session and event number is generated. The hourly curve, CPCs and conversion rates are made up.'),
+        el('li', {}, 'The fault shapes are plausible, not observed. The GA4 pause trigger is an assumption; Google does not publish it.'),
+        el('li', {}, 'The channel rule uses an abbreviated list of social and search sites. GA4\'s own engine was not run.'),
+        el('li', {}, 'Real data needs about two weeks of calibration per client before the thresholds mean anything.'),
+        el('li', {}, 'The request queue and its weights are a proposal, not a measured result.')));
+    const refs = el('div', { class: 'card' }, el('h3', {}, 'Sources for the platform facts'),
+      el('ul', { class: 'tight' }, [
+        ['GA4 BigQuery Export: daily limit, late-arriving data', 'https://support.google.com/analytics/answer/9358801'],
+        ['Set up BigQuery Export: what happens above the limit', 'https://support.google.com/analytics/answer/9823238'],
+        ['GA4 traffic-source dimensions: default channel group rules', 'https://support.google.com/analytics/answer/9756891'],
+        ['Meta action types overlap, so adding them double counts (Funnel help centre)', 'https://help.funnel.io/en/articles/17680416-facebook-pivoted-action-types-working-with-the-data'],
+        ['Meta removes 7d_view and 28d_view from the Insights API on 12 Jan 2026 (PPC Land)', 'https://ppc.land/meta-restricts-attribution-windows-and-data-retention-in-ads-insights-api/']
+      ].map(([t, u]) => el('li', {}, el('a', { href: u, target: '_blank', rel: 'noopener' }, t)))));
+    const run = el('div', { class: 'card' }, el('h3', {}, 'Run it yourself'),
+      el('p', { class: 'cap' }, el('a', { href: 'files/media-health-check-harness.zip' }, 'Download the harness (zip)'), ': generator, runner, eleven SQL files, README.'),
+      el('pre', { class: 'code' }, 'pip install duckdb numpy pandas sqlglot\npython3 gen_data.py --seed 42        # build the warehouse\npython3 run_checks.py --validate     # run checks, score, 40-seed validation\npython3 run_checks.py --seed 7 --clean   # a clean warehouse should print 0 alerts'));
+    p.append(el('div', { class: 'two', style: 'margin-top:18px' }, measured, modelled), el('div', { class: 'two', style: 'margin-top:18px' }, refs, run));
+  })();
+
+  select(location.hash.slice(1) || 'board');
+})();
